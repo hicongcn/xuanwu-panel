@@ -1,0 +1,563 @@
+package controllers
+
+import (
+	"encoding/json"
+	"path/filepath"
+	"strings"
+
+	"github.com/hicongcn/xuanwu-panel/internal/constant"
+	"github.com/hicongcn/xuanwu-panel/internal/logger"
+	"github.com/hicongcn/xuanwu-panel/internal/models"
+	"github.com/hicongcn/xuanwu-panel/internal/models/vo"
+	"github.com/hicongcn/xuanwu-panel/internal/services/tasks"
+	"github.com/hicongcn/xuanwu-panel/internal/utils"
+
+	"os"
+
+	"github.com/gin-gonic/gin"
+)
+
+type TaskController struct {
+	taskService     *tasks.TaskService
+	executorService *tasks.ExecutorService
+}
+
+func NewTaskController(taskService *tasks.TaskService, executorService *tasks.ExecutorService) *TaskController {
+	return &TaskController{
+		taskService:     taskService,
+		executorService: executorService,
+	}
+}
+
+// resolveWorkDir 将相对路径转换为绝对路径
+func resolveWorkDir(workDir string) string {
+	if workDir == "" {
+		// 空则使用默认 scripts 目录
+		absPath, err := filepath.Abs(constant.ScriptsWorkDir)
+		if err != nil {
+			return constant.ScriptsWorkDir
+		}
+		return absPath
+	}
+	// 如果已经是绝对路径，直接返回
+	if strings.HasPrefix(workDir, constant.ScriptsDirPlaceholder) {
+		return workDir
+	}
+	if filepath.IsAbs(workDir) {
+		return workDir
+	}
+	// 相对路径，基于 scripts 目录
+	fullPath := filepath.Join(constant.ScriptsWorkDir, workDir)
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		return fullPath
+	}
+	return absPath
+}
+
+// CreateTask 创建任务
+// @Summary 创建任务
+// @Description 创建一个新的任务
+// @Tags 任务管理
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param body body vo.TaskCreateReq true "任务创建信息"
+// @Success 200 {object} utils.Response{data=vo.TaskVO}
+// @Failure 400 {object} utils.Response
+// @Router /tasks [post]
+func (tc *TaskController) CreateTask(c *gin.Context) {
+	var req vo.TaskCreateReq
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.BadRequest(c, err.Error())
+		return
+	}
+
+	// 普通任务需要命令
+	if req.Type != constant.TaskTypeRepo && req.Command == "" {
+		utils.BadRequest(c, "命令不能为空")
+		return
+	}
+
+	if req.Schedule != "" {
+		if err := tc.executorService.ValidateCron(req.Schedule); err != nil {
+			utils.BadRequest(c, "无效的cron表达式: "+err.Error())
+			return
+		}
+	}
+
+	// 转换为绝对路径
+	workDir := resolveWorkDir(req.WorkDir)
+
+	var sourceID string
+	// 如果是仓库同步任务，根据 URL 生成 SourceID 用于去重
+	if req.Type == constant.TaskTypeRepo && req.Config != "" {
+		var repoCfg struct {
+			SourceURL string `json:"source_url"`
+			Branch    string `json:"branch"`
+		}
+		if err := json.Unmarshal([]byte(req.Config), &repoCfg); err == nil && repoCfg.SourceURL != "" {
+			sourceID = "repo_" + utils.GetRepoIdentifier(repoCfg.SourceURL, repoCfg.Branch)
+		}
+	}
+
+	param := tasks.TaskParam{
+		Name:          req.Name,
+		Remark:        req.Remark,
+		Command:       req.Command,
+		PreCommand:    req.PreCommand,
+		PostCommand:   req.PostCommand,
+		Tags:          req.Tags,
+		Type:          req.Type,
+		Config:        req.Config,
+		Schedule:      req.Schedule,
+		Timeout:       req.Timeout,
+		WorkDir:       workDir,
+		CleanConfig:   req.CleanConfig,
+		Envs:          req.Envs,
+		Languages:     req.Languages,
+		TriggerType:   req.TriggerType,
+		RetryCount:    req.RetryCount,
+		RetryInterval: req.RetryInterval,
+		RandomRange:   req.RandomRange,
+		SourceID:      sourceID,
+		PinType:       req.PinType,
+		Enabled:       true,
+	}
+
+	var task *models.Task
+	// 去重逻辑：如果已存在相同 SourceID 的仓库任务，则改为更新
+	if sourceID != "" {
+		task = tc.taskService.GetTaskBySourceID(sourceID)
+		if task != nil {
+			task = tc.taskService.UpdateTask(task.ID, &param)
+		}
+	}
+
+	if task == nil {
+		task = tc.taskService.CreateTask(&param)
+	}
+
+	tc.executorService.AddCronTask(task)
+
+	utils.Success(c, vo.ToTaskVO(task))
+}
+
+// GetTasks 获取任务列表
+// @Summary 获取任务列表
+// @Description 分页获取任务列表，支持按名称、标签、类型筛选
+// @Tags 任务管理
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param name query string false "任务名称"
+// @Param tags query string false "标签"
+// @Param type query string false "任务类型"
+// @Param page query int false "页码"
+// @Param page_size query int false "每页数量"
+// @Success 200 {object} utils.Response{data=utils.PaginationData{data=[]vo.TaskVO}}
+// @Router /tasks [get]
+func (tc *TaskController) GetTasks(c *gin.Context) {
+	p := utils.ParsePagination(c)
+	name := c.DefaultQuery("name", "")
+	tags := c.DefaultQuery("tags", "")
+	taskType := c.DefaultQuery("type", "")
+
+	tasks, total := tc.taskService.GetTasksWithPagination(p.Page, p.PageSize, name, tags, taskType)
+	utils.PaginatedResponse(c, vo.ToTaskVOListFromModels(tasks), total, p)
+}
+
+// GetTask 获取任务详情
+// @Summary 获取任务详情
+// @Description 根据 ID 获取任务详情
+// @Tags 任务管理
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "任务ID"
+// @Success 200 {object} utils.Response{data=vo.TaskVO}
+// @Failure 404 {object} utils.Response
+// @Router /tasks/{id} [get]
+func (tc *TaskController) GetTask(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		utils.BadRequest(c, "无效的任务ID")
+		return
+	}
+
+	task := tc.taskService.GetTaskByID(id)
+	if task == nil {
+		utils.NotFound(c, "任务不存在")
+		return
+	}
+
+	utils.Success(c, vo.ToTaskVO(task))
+}
+
+// UpdateTask 更新任务
+// @Summary 更新任务
+// @Description 根据 ID 更新任务信息
+// @Tags 任务管理
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "任务ID"
+// @Param body body vo.TaskUpdateReq true "任务更新信息"
+// @Success 200 {object} utils.Response{data=vo.TaskVO}
+// @Failure 404 {object} utils.Response
+// @Router /tasks/{id} [put]
+func (tc *TaskController) UpdateTask(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		utils.BadRequest(c, "无效的任务ID")
+		return
+	}
+
+	var req vo.TaskUpdateReq
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.BadRequest(c, err.Error())
+		return
+	}
+
+	if req.Schedule != "" {
+		if err := tc.executorService.ValidateCron(req.Schedule); err != nil {
+			utils.BadRequest(c, "无效的cron表达式: "+err.Error())
+			return
+		}
+	}
+
+	workDir := resolveWorkDir(req.WorkDir)
+
+	var sourceID string
+	if req.Type == constant.TaskTypeRepo && req.Config != "" {
+		var repoCfg struct {
+			SourceURL string `json:"source_url"`
+			Branch    string `json:"branch"`
+		}
+		if err := json.Unmarshal([]byte(req.Config), &repoCfg); err == nil && repoCfg.SourceURL != "" {
+			sourceID = "repo_" + utils.GetRepoIdentifier(repoCfg.SourceURL, repoCfg.Branch)
+		}
+	} else {
+		oldTask := tc.taskService.GetTaskByID(id)
+		if oldTask != nil {
+			sourceID = oldTask.SourceID
+		}
+	}
+
+	param := tasks.TaskParam{
+		Name:          req.Name,
+		Remark:        req.Remark,
+		Command:       req.Command,
+		PreCommand:    req.PreCommand,
+		PostCommand:   req.PostCommand,
+		Tags:          req.Tags,
+		Type:          req.Type,
+		Config:        req.Config,
+		Schedule:      req.Schedule,
+		Timeout:       req.Timeout,
+		WorkDir:       workDir,
+		CleanConfig:   req.CleanConfig,
+		Envs:          req.Envs,
+		Languages:     req.Languages,
+		TriggerType:   req.TriggerType,
+		RetryCount:    req.RetryCount,
+		RetryInterval: req.RetryInterval,
+		RandomRange:   req.RandomRange,
+		SourceID:      sourceID,
+		PinType:       req.PinType,
+		Enabled:       req.Enabled,
+	}
+
+	task := tc.taskService.UpdateTask(id, &param)
+	if task == nil {
+		utils.NotFound(c, "任务不存在")
+		return
+	}
+
+	if utils.DerefBool(task.Enabled, true) {
+		tc.executorService.AddCronTask(task)
+	} else {
+		tc.executorService.RemoveCronTask(task.ID)
+	}
+
+	utils.Success(c, vo.ToTaskVO(task))
+}
+
+// DeleteTask 删除任务
+// @Summary 删除任务
+// @Description 根据 ID 删除任务
+// @Tags 任务管理
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "任务ID"
+// @Success 200 {object} utils.Response
+// @Failure 404 {object} utils.Response
+// @Router /tasks/{id} [delete]
+func (tc *TaskController) DeleteTask(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		utils.BadRequest(c, "无效的任务ID")
+		return
+	}
+
+	task := tc.taskService.GetTaskByID(id)
+	if task == nil {
+		utils.NotFound(c, "任务不存在")
+		return
+	}
+
+	deleteFiles := c.Query("delete_files") == "true"
+
+	if deleteFiles && task.Type == constant.TaskTypeRepo {
+		tc.deleteRepoPhysicalFiles(task)
+	}
+
+	tc.executorService.RemoveCronTask(id)
+
+	success := tc.taskService.DeleteTask(id)
+	if !success {
+		utils.NotFound(c, "任务不存在")
+		return
+	}
+
+	utils.SuccessMsg(c, "删除成功")
+}
+
+// deleteRepoPhysicalFiles 删除仓库关联的物理文件
+func (tc *TaskController) deleteRepoPhysicalFiles(task *models.Task) {
+	if task.Type != constant.TaskTypeRepo {
+		return
+	}
+
+	logger.Infof("[Controller] 开始尝试物理删除任务关联文件: %s", task.Name)
+	var repoCfg models.RepoConfig
+	if err := json.Unmarshal([]byte(task.Config), &repoCfg); err != nil {
+		logger.Errorf("[Controller] 解析任务配置失败: %v", err)
+		return
+	}
+
+	targetPath := repoCfg.TargetPath
+	if targetPath == "" {
+		// 如果 TargetPath 为空，调用系统的计算函数获取默认目录名
+		repoId := utils.GetRepoIdentifier(repoCfg.SourceURL, repoCfg.Branch)
+		if repoId != "" {
+			targetPath = repoId
+			logger.Infof("[Controller] TargetPath 为空，使用计算出的标识符: %s", targetPath)
+		}
+	}
+
+	if targetPath == "" || targetPath == constant.ScriptsDirPlaceholder {
+		logger.Warnf("[Controller] 任务 %s 无法确定有效的物理删除路径，跳过", task.Name)
+		return
+	}
+
+	// 确定绝对路径
+	scriptsDir, _ := filepath.Abs(constant.ScriptsWorkDir)
+	fullPath := targetPath
+	if strings.HasPrefix(targetPath, constant.ScriptsDirPlaceholder) {
+		fullPath = filepath.Join(scriptsDir, strings.TrimPrefix(targetPath, constant.ScriptsDirPlaceholder))
+	} else if !filepath.IsAbs(targetPath) {
+		fullPath = filepath.Join(scriptsDir, targetPath)
+	}
+
+	absTargetPath, _ := filepath.Abs(fullPath)
+	logger.Infof("[Controller] 最终计算的绝对路径: %s, Scripts目录: %s", absTargetPath, scriptsDir)
+	scriptsDir, _ = filepath.Abs(constant.ScriptsWorkDir)
+
+	// 安全检查：使用 Rel 判断路径关系
+	rel, err := filepath.Rel(scriptsDir, absTargetPath)
+	if err != nil {
+		logger.Errorf("[Controller] 计算相对路径失败: %v", err)
+		return
+	}
+
+	// 必须是在 scripts 目录下（不以 .. 开头）且不能是 scripts 目录本身 (.)
+	if rel != "." && !strings.HasPrefix(rel, "..") {
+		err := os.RemoveAll(absTargetPath)
+		if err != nil {
+			logger.Errorf("[Controller] 物理删除文件夹失败: %s, 路径: %s, 错误: %v", task.Name, absTargetPath, err)
+		} else {
+			logger.Infof("[Controller] 已成功物理删除文件夹: %s, 路径: %s", task.Name, absTargetPath)
+		}
+	} else {
+		logger.Warnf("[Controller] 拒绝物理删除安全目录之外的路径: %s", absTargetPath)
+	}
+}
+
+func (tc *TaskController) BatchDeleteTasks(c *gin.Context) {
+	var req struct {
+		IDs []string `json:"ids" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.BadRequest(c, err.Error())
+		return
+	}
+
+	for _, id := range req.IDs {
+		tc.executorService.RemoveCronTask(id)
+	}
+
+	count := tc.taskService.BatchDeleteTasks(req.IDs)
+
+	utils.Success(c, gin.H{"count": count})
+}
+
+// BatchDeleteByQuery 根据查询条件批量删除任务
+// @Summary 根据查询条件批量删除任务
+// @Description 根据查询条件批量删除匹配的所有任务
+// @Tags 任务管理
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param name query string false "任务名称关键词"
+// @Param tags query string false "标签关键词"
+// @Param type query string false "任务类型"
+// @Success 200 {object} utils.Response{data=map[string]int}
+// @Failure 401 {object} utils.Response "未授权"
+// @Router /tasks/batch-by-query [delete]
+func (tc *TaskController) BatchDeleteByQuery(c *gin.Context) {
+	name := c.Query("name")
+	tags := c.Query("tags")
+	taskType := c.Query("type")
+
+	tasks, _ := tc.taskService.GetTasksWithPagination(1, 999999, name, tags, taskType)
+	if len(tasks) == 0 {
+		utils.Success(c, gin.H{"count": 0})
+		return
+	}
+
+	var ids []string
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+		tc.executorService.RemoveCronTask(task.ID)
+	}
+
+	count := tc.taskService.BatchDeleteTasks(ids)
+
+	utils.Success(c, gin.H{"count": count})
+}
+
+// StopTask 停止任务
+// @Summary 停止任务
+// @Description 根据运行日志 ID 停止正在执行的任务
+// @Tags 任务管理
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param logID path string true "运行日志ID"
+// @Success 200 {object} utils.Response
+// @Failure 400 {object} utils.Response
+// @Router /tasks/stop/{logID} [post]
+func (tc *TaskController) StopTask(c *gin.Context) {
+	logID := c.Param("logID")
+	if logID == "" {
+		utils.BadRequest(c, "无效的日志ID")
+		return
+	}
+
+	err := tc.executorService.StopTaskExecution(logID)
+	if err != nil {
+		utils.BadRequest(c, err.Error())
+		return
+	}
+
+	utils.SuccessMsg(c, "停止请求已发送")
+}
+
+// GetTags 获取所有任务标签
+// @Summary 获取所有任务标签
+// @Description 获取系统中所有任务已使用的唯一标签列表
+// @Tags 任务管理
+// @Produce json
+// @Security BearerAuth
+// @Success 200 {object} utils.Response{data=[]string}
+// @Router /tasks/tags [get]
+func (tc *TaskController) GetTags(c *gin.Context) {
+	tags, err := tc.taskService.GetAllTags()
+	if err != nil {
+		utils.ServerError(c, err.Error())
+		return
+	}
+	utils.Success(c, tags)
+}
+
+// SyncRepoTasks 增量同步仓库任务状态（供本地 reposync 进程调用）
+func (tc *TaskController) SyncRepoTasks(c *gin.Context) {
+	var req struct {
+		RepoID      string   `json:"repo_id"`
+		UpsertedIDs []string `json:"upserted_ids"`
+		DeletedIDs  []string `json:"deleted_ids"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.BadRequest(c, err.Error())
+		return
+	}
+
+	tc.executorService.SyncRepoTasks(req.UpsertedIDs, req.DeletedIDs)
+	utils.SuccessMsg(c, "增量同步成功")
+}
+
+// ToggleTask 切换任务启用/禁用状态
+func (tc *TaskController) ToggleTask(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		utils.BadRequest(c, "无效的任务ID")
+		return
+	}
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.BadRequest(c, err.Error())
+		return
+	}
+
+	task := tc.taskService.GetTaskByID(id)
+	if task == nil {
+		utils.NotFound(c, "任务不存在")
+		return
+	}
+
+	param := tasks.TaskParam{
+		Name:          task.Name,
+		Remark:        task.Remark,
+		Command:       string(task.Command),
+		PreCommand:    string(task.PreCommand),
+		PostCommand:   string(task.PostCommand),
+		Tags:          task.Tags,
+		Type:          task.Type,
+		Config:        string(task.Config),
+		Schedule:      task.Schedule,
+		Timeout:       task.Timeout,
+		WorkDir:       task.WorkDir,
+		CleanConfig:   task.CleanConfig,
+		Envs:          string(task.Envs),
+		Languages:     task.Languages,
+		TriggerType:   task.TriggerType,
+		RetryCount:    task.RetryCount,
+		RetryInterval: task.RetryInterval,
+		RandomRange:   task.RandomRange,
+		SourceID:      task.SourceID,
+		PinType:       task.PinType,
+		Enabled:       req.Enabled,
+	}
+
+	updatedTask := tc.taskService.UpdateTask(id, &param)
+	if updatedTask == nil {
+		utils.NotFound(c, "任务不存在")
+		return
+	}
+
+	if req.Enabled {
+		tc.executorService.AddCronTask(updatedTask)
+	} else {
+		tc.executorService.RemoveCronTask(updatedTask.ID)
+	}
+
+	utils.Success(c, vo.ToTaskVO(updatedTask))
+}

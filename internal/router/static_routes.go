@@ -1,0 +1,252 @@
+package router
+
+import (
+	"compress/gzip"
+	"encoding/json"
+	"io"
+	"io/fs"
+	"mime"
+	"net/http"
+	"path/filepath"
+	"strings"
+
+	"github.com/hicongcn/xuanwu-panel/internal/constant"
+	"github.com/hicongcn/xuanwu-panel/internal/services"
+	"github.com/hicongcn/xuanwu-panel/internal/static"
+
+	"github.com/gin-gonic/gin"
+)
+
+// cacheControl 返回设置 Cache-Control header 的中间件
+func cacheControl(value string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", value)
+		c.Next()
+	}
+}
+
+func getStaticFS() fs.FS {
+	s := static.GetFS()
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+func initStaticRoutes(root *gin.RouterGroup) {
+
+	// 专门处理 /assets 目录下的资源
+	root.GET("/assets/*filepath", cacheControl("public, max-age=31536000, immutable"), func(ctx *gin.Context) {
+		fullPath := "assets" + ctx.Param("filepath")
+		fullPath = strings.TrimPrefix(fullPath, "/")
+
+		isGzipSupported := strings.Contains(ctx.GetHeader("Accept-Encoding"), "gzip")
+		gzPath := fullPath + ".gz"
+
+		// 确定 MIME 类型
+		ext := filepath.Ext(fullPath)
+		contentType := mime.TypeByExtension(ext)
+		if contentType == "" {
+			switch ext {
+			case ".js":
+				contentType = "application/javascript"
+			case ".css":
+				contentType = "text/css"
+			case ".svg":
+				contentType = "image/svg+xml"
+			default:
+				contentType = "application/octet-stream"
+			}
+		}
+
+		// 优先尝试读取 .gz 文件
+		if fsys := getStaticFS(); fsys != nil {
+			if gzFile, err := fsys.Open(gzPath); err == nil {
+				defer gzFile.Close()
+				ctx.Header("Content-Type", contentType)
+
+				if isGzipSupported {
+					ctx.Header("Content-Encoding", "gzip")
+					ctx.Status(http.StatusOK)
+					io.Copy(ctx.Writer, gzFile)
+				} else {
+					gr, _ := gzip.NewReader(gzFile)
+					defer gr.Close()
+					ctx.Status(http.StatusOK)
+					io.Copy(ctx.Writer, gr)
+				}
+				return
+			}
+
+			if file, err := fsys.Open(fullPath); err == nil {
+				defer file.Close()
+				ctx.Header("Content-Type", contentType)
+				ctx.Status(http.StatusOK)
+				io.Copy(ctx.Writer, file)
+				return
+			}
+		}
+
+		ctx.Status(404)
+	})
+
+	// logo.svg 等单文件处理
+	root.GET("/logo.svg", func(ctx *gin.Context) {
+		settings := services.NewSettingsService()
+		icon := settings.Get(constant.SectionSite, constant.KeyIcon)
+		if icon != "" {
+			ctx.Header("Cache-Control", "public, max-age=86400")
+			ctx.Data(http.StatusOK, "image/svg+xml", []byte(icon))
+			return
+		}
+		serveSingleFile(ctx, "logo.svg", "image/svg+xml", "public, max-age=86400")
+	})
+
+	// PWA 相关路由处理
+	initPWARoutes(root)
+}
+
+func initPWARoutes(root *gin.RouterGroup) {
+	// PWA 相关文件处理
+	pwaRootFiles := map[string]string{
+		"/sw.js":            "application/javascript",
+		"/registerSW.js":    "application/javascript",
+		"/favicon.ico":      "image/x-icon",
+		"/pwa-icon-192.png": "image/png",
+		"/pwa-icon-512.png": "image/png",
+	}
+
+	for path, contentType := range pwaRootFiles {
+		pPath := path
+		pType := contentType
+		root.GET(pPath, func(ctx *gin.Context) {
+			file := strings.TrimPrefix(pPath, "/")
+			serveSingleFile(ctx, file, pType, "public, no-cache")
+		})
+	}
+
+	// 动态 manifest 处理 (支持由 Go 后端控制标题和图标)
+	root.GET("/manifest.webmanifest", handleManifest)
+
+	// 动态匹配 workbox-*.js (Vite PWA 生成的库文件)
+	root.GET("/workbox-:hash.js", func(ctx *gin.Context) {
+		file := "workbox-" + ctx.Param("hash") + ".js"
+		serveSingleFile(ctx, file, "application/javascript", "public, max-age=31536000, immutable")
+	})
+}
+
+func handleManifest(ctx *gin.Context) {
+
+	fsys := getStaticFS()
+	if fsys == nil {
+		ctx.Status(404)
+		return
+	}
+
+	data, err := fs.ReadFile(fsys, "manifest.webmanifest")
+	if err != nil {
+		ctx.Status(404)
+		return
+	}
+
+	var manifest map[string]interface{}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		// 如果解析失败，回退到原始文件
+		ctx.Data(200, "application/manifest+json", data)
+		return
+	}
+
+	// 注入后端配置的标题
+	settings := services.NewSettingsService()
+	title := settings.Get(constant.SectionSite, constant.KeyTitle)
+	if title != "" {
+		manifest["name"] = title
+		manifest["short_name"] = title
+	}
+
+	// 注入后端配置的图标 (首选 logo.svg)
+	manifest["icons"] = []map[string]interface{}{
+		{
+			"src":     "/logo.svg",
+			"sizes":   "any",
+			"type":    "image/svg+xml",
+			"purpose": "any maskable",
+		},
+	}
+
+	res, _ := json.Marshal(manifest)
+	ctx.Header("Cache-Control", "public, no-cache")
+	ctx.Data(200, "application/manifest+json", res)
+}
+
+func serveSingleFile(ctx *gin.Context, filename string, contentType string, cache string) {
+
+	if cache != "" {
+		ctx.Header("Cache-Control", cache)
+	}
+	ctx.Header("Content-Type", contentType)
+
+	isGzipSupported := strings.Contains(ctx.GetHeader("Accept-Encoding"), "gzip")
+
+	fsys := getStaticFS()
+	if fsys != nil {
+		if gzFile, err := fsys.Open(filename + ".gz"); err == nil {
+			defer gzFile.Close()
+			if isGzipSupported {
+				ctx.Header("Content-Encoding", "gzip")
+				ctx.Status(200)
+				io.Copy(ctx.Writer, gzFile)
+			} else {
+				gr, _ := gzip.NewReader(gzFile)
+				defer gr.Close()
+				ctx.Status(200)
+				io.Copy(ctx.Writer, gr)
+			}
+			return
+		}
+
+		if file, err := fsys.Open(filename); err == nil {
+			defer file.Close()
+			ctx.Status(200)
+			io.Copy(ctx.Writer, file)
+			return
+		}
+	}
+
+	ctx.Status(404)
+}
+
+// serveSPA 注入配置并返回 index.html 给前端渲染
+func serveSPA(ctx *gin.Context, urlPrefix string, status int) {
+
+	var data []byte
+	if fsys := getStaticFS(); fsys != nil {
+		if gzFile, err := fsys.Open("index.html.gz"); err == nil {
+			defer gzFile.Close()
+			gr, _ := gzip.NewReader(gzFile)
+			data, _ = io.ReadAll(gr)
+			gr.Close()
+		} else if file, err := fsys.Open("index.html"); err == nil {
+			defer file.Close()
+			data, _ = io.ReadAll(file)
+		}
+	}
+
+	if data == nil {
+		ctx.String(status, "index.html not found.")
+		return
+	}
+
+	html := string(data)
+	baseHref := urlPrefix + "/"
+	if urlPrefix == "" {
+		baseHref = "/"
+	}
+	html = strings.Replace(html, "<head>", "<head>\n    <base href=\""+baseHref+"\">", 1)
+	configScript := `<script>window.__BASE_URL__ = "` + urlPrefix + `"; window.__API_VERSION__ = "/api/v1";</script>`
+	html = strings.Replace(html, "</head>", configScript+"</head>", 1)
+
+	ctx.Header("Content-Type", "text/html; charset=utf-8")
+	ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	ctx.Data(status, "text/html; charset=utf-8", []byte(html))
+}

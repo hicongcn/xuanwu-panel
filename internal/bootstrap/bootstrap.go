@@ -1,0 +1,150 @@
+package bootstrap
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
+
+	"github.com/hicongcn/xuanwu-panel/internal/constant"
+	"github.com/hicongcn/xuanwu-panel/internal/database"
+	"github.com/hicongcn/xuanwu-panel/internal/logger"
+	"github.com/hicongcn/xuanwu-panel/internal/router"
+	"github.com/hicongcn/xuanwu-panel/internal/services"
+	"github.com/hicongcn/xuanwu-panel/internal/utils"
+
+	"github.com/gin-gonic/gin"
+)
+
+type App struct {
+	Config *services.AppConfig
+	Router *gin.Engine
+}
+
+func New() *App {
+	app := InitBasic()
+	app.initRouter()
+	// 初始化完成后回收一次内存
+	utils.FreeMemory()
+	return app
+}
+
+var (
+	globalApp *App
+	initOnce  sync.Once
+)
+
+func InitBasic() *App {
+	initOnce.Do(func() {
+		app := &App{}
+		utils.InitRuntime()
+
+		// 自动加载配置 (内部会自动处理 XW_CONFIG_PATH 环境变量与默认路径的优先级)
+		app.initConfigWithPath("")
+		app.initDatabase()
+
+		// 启用文件日志输出
+		if err := logger.SetupFileOutput(constant.LogDir); err != nil {
+			logger.Warnf("[Log] 无法启用文件日志: %v", err)
+		}
+
+		globalApp = app
+	})
+	return globalApp
+}
+
+// InitBasicForCmd 专为命令行工具定制的基础环境初始化入口
+// 内部会调高控制台日志过滤级别以自动静默屏蔽刷屏的底层系统与组件启动 Info 日志
+func InitBasicForCmd() *App {
+	logger.SetLevel("warn")
+	return InitBasic()
+}
+
+func (a *App) initConfigWithPath(path string) {
+	cfg, err := services.LoadConfig(path)
+	if err != nil {
+		logger.Fatalf("Failed to load config: %v", err)
+	}
+	a.Config = cfg
+
+	// Ensure directories exist
+	err = os.MkdirAll(constant.DataDir, 0755)
+	if err != nil {
+		return
+	}
+	err = os.MkdirAll(constant.ScriptsWorkDir, 0755)
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Join(constant.DataDir, "config"), 0755)
+	_ = os.MkdirAll(filepath.Join(constant.DataDir, "db"), 0755)
+	_ = os.MkdirAll(filepath.Join(constant.DataDir, "bak"), 0755)
+	_ = os.MkdirAll(filepath.Join(constant.DataDir, "deps"), 0755)
+	_ = os.MkdirAll(filepath.Join(constant.DataDir, "log"), 0755)
+
+	a.setupXuanwuBin()
+}
+
+func (a *App) setupXuanwuBin() {
+	binDir := filepath.Join(constant.DataDir, "bin")
+	_ = os.MkdirAll(binDir, 0755)
+
+	exe, err := os.Executable()
+	if err == nil {
+		linkPath := filepath.Join(binDir, "xuanwu")
+		if runtime.GOOS == "windows" {
+			linkPath += ".exe"
+		}
+		os.Remove(linkPath)
+		_ = os.Symlink(exe, linkPath)
+	}
+}
+
+func (a *App) initDatabase() {
+	dbCfg := &database.Config{
+		Type:     a.Config.Database.Type,
+		Host:     a.Config.Database.Host,
+		Port:     a.Config.Database.Port,
+		User:     a.Config.Database.User,
+		Password: a.Config.Database.Password,
+		DBName:   a.Config.Database.DBName,
+		Path:     a.Config.Database.Path,
+		DSN:      a.Config.Database.DSN,
+	}
+
+	if err := database.Init(dbCfg); err != nil {
+		logger.Fatalf("Failed to init database: %v", err)
+	}
+
+	// 记录各个初始化阶段的时间
+	startTime := time.Now()
+
+	// 执行 V3 迁移（ID 变更迁移）
+	if err := services.RunMigrationV3(); err != nil {
+		logger.Fatalf("Failed to run V3 migration: %v", err)
+	}
+	v3Duration := time.Since(startTime)
+	logger.Infof("[Database] V3 迁移检查完成, 耗时: %v", v3Duration)
+
+	// 执行表结构同步
+	migrateStart := time.Now()
+	if err := database.Migrate(); err != nil {
+		logger.Fatalf("Failed to migrate database: %v", err)
+	}
+	migrateDuration := time.Since(migrateStart)
+	logger.Infof("[Database] 表结构同步完成, 耗时: %v", migrateDuration)
+	logger.Infof("[Database] 数据库总初始化耗时: %v", time.Since(startTime))
+}
+
+func (a *App) initRouter() {
+	ctrls := router.RegisterControllers()
+	a.Router = router.Setup(ctrls)
+}
+
+func (a *App) Run() {
+	addr := fmt.Sprintf("%s:%d", a.Config.Server.Host, a.Config.Server.Port)
+	logger.Infof("Starting server on %s", addr)
+	a.Router.Run(addr)
+}

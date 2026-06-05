@@ -1,0 +1,32 @@
+services:
+  biih-dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    container_name: biih-dev
+    ports:
+      - "8052:8052"
+      - "5173:5173"
+    volumes:
+      - .:/app:Z
+      - xuanwu-envs:/app/envs
+      - xuanwu-node-modules:/app/web/node_modules
+      - go-path:/go
+      - npm-cache:/var/cache/npm
+    environment:
+      - TZ=Asia/Shanghai
+      - DEV_UID=${DEV_UID:-1000}
+      - DEV_GID=${DEV_GID:-1000}
+      - MISE_YES=1  # Auto-confirm mise prompts
+    stdin_open: true
+    tty: true
+
+volumes:
+  xuanwu-envs:
+    name: xuanwu_dev_envs
+  xuanwu-node-modules:
+    name: xuanwu_dev_node_modules
+  go-path:
+    name: xuanwu_dev_go_path
+  npm-cache:
+    name: xuanwu_dev_npm_cache

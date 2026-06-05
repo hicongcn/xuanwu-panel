@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="shell" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f3460"/>
+      <stop offset="50%" style="stop-color:#1a5276"/>
+      <stop offset="100%" style="stop-color:#0d2137"/>
+    </linearGradient>
+    <linearGradient id="snake" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2ecc71"/>
+      <stop offset="100%" style="stop-color:#27ae60"/>
+    </linearGradient>
+  </defs>
+  <!-- 背景圆形 -->
+  <circle cx="256" cy="256" r="250" fill="url(#bg)" stroke="#0f3460" stroke-width="4"/>
+  <!-- 龟壳 -->
+  <ellipse cx="256" cy="290" rx="140" ry="110" fill="url(#shell)" stroke="#3498db" stroke-width="3"/>
+  <!-- 龟壳纹路 -->
+  <path d="M256 180 L256 400" stroke="#3498db" stroke-width="2" fill="none" opacity="0.5"/>
+  <path d="M150 240 Q256 210 362 240" stroke="#3498db" stroke-width="2" fill="none" opacity="0.5"/>
+  <path d="M130 310 Q256 270 382 310" stroke="#3498db" stroke-width="2" fill="none" opacity="0.5"/>
+  <path d="M150 360 Q256 330 362 360" stroke="#3498db" stroke-width="2" fill="none" opacity="0.5"/>
+  <!-- 龟壳六边形纹路 -->
+  <path d="M256 190 L200 230 L200 290 L256 330 L312 290 L312 230 Z" stroke="#4aa3df" stroke-width="2.5" fill="none" opacity="0.6"/>
+  <path d="M256 230 L220 255 L220 300 L256 325 L292 300 L292 255 Z" stroke="#4aa3df" stroke-width="2" fill="none" opacity="0.4"/>
+  <!-- 龟头 -->
+  <ellipse cx="256" cy="175" rx="30" ry="25" fill="#1a5276" stroke="#3498db" stroke-width="2"/>
+  <circle cx="246" cy="170" r="4" fill="#ecf0f1"/>
+  <circle cx="266" cy="170" r="4" fill="#ecf0f1"/>
+  <circle cx="246" cy="170" r="2" fill="#2c3e50"/>
+  <circle cx="266" cy="170" r="2" fill="#2c3e50"/>
+  <!-- 龟嘴 -->
+  <path d="M248 182 Q256 188 264 182" stroke="#3498db" stroke-width="1.5" fill="none"/>
+  <!-- 四肢 -->
+  <ellipse cx="145" cy="250" rx="28" ry="16" fill="#1a5276" stroke="#3498db" stroke-width="2" transform="rotate(-30,145,250)"/>
+  <ellipse cx="367" cy="250" rx="28" ry="16" fill="#1a5276" stroke="#3498db" stroke-width="2" transform="rotate(30,367,250)"/>
+  <ellipse cx="155" cy="370" rx="25" ry="14" fill="#1a5276" stroke="#3498db" stroke-width="2" transform="rotate(20,155,370)"/>
+  <ellipse cx="357" cy="370" rx="25" ry="14" fill="#1a5276" stroke="#3498db" stroke-width="2" transform="rotate(-20,357,370)"/>
+  <!-- 尾巴 -->
+  <path d="M256 400 Q256 430 240 445" stroke="#1a5276" stroke-width="6" fill="none" stroke-linecap="round"/>
+  <!-- 蛇身（从龟壳后方绕出） -->
+  <path d="M320 200 Q380 160 400 100 Q410 70 390 50 Q370 35 350 50 Q340 60 350 80 Q365 110 340 140" stroke="url(#snake)" stroke-width="12" fill="none" stroke-linecap="round"/>
+  <!-- 蛇头 -->
+  <ellipse cx="340" cy="140" rx="16" ry="12" fill="#2ecc71" stroke="#27ae60" stroke-width="2"/>
+  <circle cx="335" cy="136" r="3" fill="#ecf0f1"/>
+  <circle cx="347" cy="136" r="3" fill="#ecf0f1"/>
+  <circle cx="335" cy="136" r="1.5" fill="#2c3e50"/>
+  <circle cx="347" cy="136" r="1.5" fill="#2c3e50"/>
+  <!-- 蛇信子 -->
+  <path d="M332 146 L326 156 M332 146 L328 158" stroke="#e74c3c" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  <!-- 蛇身纹路 -->
+  <circle cx="375" cy="110" r="3" fill="#27ae60" opacity="0.6"/>
+  <circle cx="395" cy="75" r="3" fill="#27ae60" opacity="0.6"/>
+  <circle cx="380" cy="50" r="3" fill="#27ae60" opacity="0.6"/>
+  <circle cx="360" cy="60" r="3" fill="#27ae60" opacity="0.6"/>
+  <!-- 玄武文字 -->
+  <text x="256" y="475" text-anchor="middle" font-family="serif" font-size="36" font-weight="bold" fill="#4aa3df" opacity="0.9">玄武</text>
+</svg>

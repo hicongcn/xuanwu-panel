@@ -1,0 +1,7 @@
+{
+  "name": "xuanwu",
+  "version": "1.0.0",
+  "description": "Xuanwu Panel internal helper for Node.js",
+  "main": "index.js",
+  "license": "MIT"
+}

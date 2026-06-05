@@ -1,0 +1,327 @@
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
+
+const props = withDefaults(
+  defineProps<{
+    fontSize?: number
+    autoConnect?: boolean
+    initialCommand?: string
+  }>(),
+  {
+    fontSize: 13,
+    autoConnect: true,
+    initialCommand: ''
+  }
+)
+
+const emit = defineEmits<{
+  connected: []
+  disconnected: []
+  success: []
+  failed: []
+  'status-change': [status: { text: string; type: 'success' | 'error' | 'info' } | null]
+}>()
+
+const terminalRef = ref<HTMLDivElement | null>(null)
+let terminal: Terminal | null = null
+let fitAddon: FitAddon | null = null
+let ws: WebSocket | null = null
+let isPtyMode = false
+let inputBuffer = ''
+let commandHistory: string[] = []
+let historyIndex = -1
+
+const statusMessage = ref<{ text: string; type: 'success' | 'error' | 'info' } | null>(null)
+
+watch(() => props.fontSize, (newVal) => {
+  if (terminal && newVal) {
+    terminal.options.fontSize = newVal
+    handleResize()
+  }
+})
+
+watch(statusMessage, (newVal) => {
+  emit('status-change', newVal)
+})
+
+function initTerminal(forceConnect = false) {
+  if (!terminalRef.value) return
+
+  // 清理旧终端与 DOM 内容
+  if (terminal) {
+    terminal.dispose()
+    terminal = null
+  }
+  terminalRef.value.innerHTML = ''
+
+  // 确保旧的 WebSocket 完全关闭
+  if (ws) {
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close()
+    }
+    ws = null
+  }
+
+  inputBuffer = ''
+  isPtyMode = false
+  statusMessage.value = { text: '正在初始化终端...', type: 'info' }
+
+  terminal = new Terminal({
+    cursorBlink: true,
+    fontSize: props.fontSize,
+    lineHeight: 1.25,
+    fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+    theme: {
+      background: '#1e1e1e',
+      foreground: '#d4d4d4',
+      cursor: '#d4d4d4',
+    }
+  })
+
+  fitAddon = new FitAddon()
+  terminal.loadAddon(fitAddon)
+  terminal.open(terminalRef.value)
+
+  // 延迟调用 fit，确保 DOM 已渲染
+  setTimeout(() => {
+    try {
+      fitAddon?.fit()
+    } catch (e) {
+      // 忽略 fit 错误
+    }
+  }, 50)
+
+  terminal.focus()
+
+  // autoConnect 或者强制连接时才连接
+  if (props.autoConnect || forceConnect) {
+    // 延迟连接，确保终端完全初始化和旧连接完全关闭
+    setTimeout(() => {
+      connectWebSocket()
+    }, 200)
+  }
+
+  // 清除当前输入行（Windows 模式用）
+  function clearLine() {
+    for (let i = 0; i < inputBuffer.length; i++) {
+      terminal?.write('\b \b')
+    }
+  }
+
+  // 处理用户输入
+  terminal.onData((data) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+
+    if (isPtyMode) {
+      ws.send(data)
+      return
+    }
+
+    if (data === '\r') {
+      terminal?.write('\r\n')
+      if (inputBuffer.trim()) {
+        commandHistory.push(inputBuffer)
+        historyIndex = commandHistory.length
+        ws.send(inputBuffer + '\r\n')
+      }
+      inputBuffer = ''
+    } else if (data === '\x1b[A') {
+      if (commandHistory.length > 0 && historyIndex > 0) {
+        clearLine()
+        historyIndex--
+        inputBuffer = commandHistory[historyIndex] ?? ''
+        terminal?.write(inputBuffer)
+      }
+    } else if (data === '\x1b[B') {
+      clearLine()
+      if (historyIndex < commandHistory.length - 1) {
+        historyIndex++
+        inputBuffer = commandHistory[historyIndex] ?? ''
+        terminal?.write(inputBuffer)
+      } else {
+        historyIndex = commandHistory.length
+        inputBuffer = ''
+      }
+    } else if (data === '\x7f' || data === '\b') {
+      if (inputBuffer.length > 0) {
+        inputBuffer = inputBuffer.slice(0, -1)
+        terminal?.write('\b \b')
+      }
+    } else if (data === '\x03') {
+      ws.send('\x03')
+      inputBuffer = ''
+      historyIndex = commandHistory.length
+      terminal?.write('^C\r\n')
+    } else if (data >= ' ' || data === '\t') {
+      inputBuffer += data
+      terminal?.write(data)
+    }
+  })
+}
+
+function connectWebSocket() {
+  // 如果已有连接，先关闭
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    ws.close()
+    ws = null
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const baseUrl = (window as any).__BASE_URL__ || ''
+  const apiVersion = (window as any).__API_VERSION__ || '/api/v1'
+  const wsUrl = `${protocol}//${window.location.host}${baseUrl}${apiVersion}/terminal/ws`
+
+  try {
+    ws = new WebSocket(wsUrl)
+  } catch {
+    statusMessage.value = { text: '无法创建 WebSocket 连接', type: 'error' }
+    return
+  }
+
+  ws.onopen = () => {
+    statusMessage.value = { text: '已连接到终端', type: 'success' }
+    emit('connected')
+
+    // 如果有初始命令，延迟发送（PTY 会自动回显命令）
+    if (props.initialCommand) {
+      setTimeout(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(props.initialCommand + '\r')
+        }
+      }, 100)
+    }
+    terminal?.focus()
+    // 连接成功后立即触发一次尺寸同步
+    handleResize()
+  }
+
+  ws.onmessage = (event) => {
+    if (event.data === '__PTY_MODE__') {
+      isPtyMode = true
+      handleResize() // 关键：模式确认后立即同步一次尺寸
+      return
+    }
+    if (event.data === '__PIPE_MODE__') {
+      isPtyMode = false
+      handleResize()
+      return
+    }
+    terminal?.write(event.data)
+
+    // 检测结果标识（保持简单的单次消息检测，不使用持久缓冲区，避免重复触发通知）
+    if (typeof event.data === 'string') {
+      if (event.data.includes('__INSTALL_SUCCESS__')) {
+        emit('success')
+      } else if (event.data.includes('__INSTALL_FAILED__')) {
+        emit('failed')
+      }
+    }
+  }
+
+  ws.onclose = () => {
+    statusMessage.value = { text: '连接已断开', type: 'error' }
+    emit('disconnected')
+  }
+
+  ws.onerror = () => {
+    statusMessage.value = { text: '连接错误', type: 'error' }
+  }
+}
+
+function reconnect() {
+  initTerminal(true)
+}
+
+function dispose() {
+  if (ws) {
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close()
+    }
+    ws = null
+  }
+  if (terminal) {
+    terminal.dispose()
+    terminal = null
+  }
+  inputBuffer = ''
+  isPtyMode = false
+}
+
+function handleResize() {
+  try {
+    fitAddon?.fit()
+    // 通知后端调整 PTY 尺寸
+    if (isPtyMode && terminal && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'resize',
+        cols: terminal.cols,
+        rows: terminal.rows
+      }))
+    }
+  } catch (e) {
+    console.warn('Terminal resize failed:', e)
+  }
+}
+
+// 暴露方法给父组件
+defineExpose({
+  reconnect,
+  dispose,
+  initTerminal
+})
+
+onMounted(() => {
+  window.addEventListener('resize', handleResize)
+  // 延迟初始化，确保 DOM 完全渲染
+  setTimeout(initTerminal, 150)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+  dispose()
+})
+</script>
+
+<template>
+  <div ref="terminalRef" class="terminal-container w-full h-full !bg-[#1e1e1e]" />
+</template>
+
+<style scoped>
+.terminal-container {
+  background: #1e1e1e !important;
+}
+
+.terminal-container :deep(.xterm) {
+  padding: 0;
+}
+
+.terminal-container :deep(.xterm-viewport) {
+  scrollbar-width: thin;
+  scrollbar-color: #4a4a4a #1e1e1e;
+  background: #1e1e1e !important;
+}
+
+.terminal-container :deep(.xterm-screen) {
+  background: #1e1e1e !important;
+}
+
+.terminal-container :deep(.xterm-viewport::-webkit-scrollbar) {
+  width: 8px;
+}
+
+.terminal-container :deep(.xterm-viewport::-webkit-scrollbar-track) {
+  background: #1e1e1e;
+}
+
+.terminal-container :deep(.xterm-viewport::-webkit-scrollbar-thumb) {
+  background: #4a4a4a;
+  border-radius: 4px;
+}
+
+.terminal-container :deep(.xterm-viewport::-webkit-scrollbar-thumb:hover) {
+  background: #5a5a5a;
+}
+</style>

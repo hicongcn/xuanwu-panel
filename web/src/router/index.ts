@@ -1,0 +1,110 @@
+import { createRouter, createWebHistory } from 'vue-router'
+import { checkAuth } from '@/api'
+
+// 获取 base URL（从后端注入的全局变量）
+const BASE_URL = (window as any).__BASE_URL__ || ''
+
+// 缓存认证状态，避免每次路由跳转都请求
+let authChecked = false
+let isAuth = false
+
+async function getAuthStatus(force = false): Promise<boolean> {
+  if (!force && authChecked) {
+    return isAuth
+  }
+  isAuth = await checkAuth()
+  authChecked = true
+  return isAuth
+}
+
+// 重置认证状态（登出时调用）
+export function resetAuthCache() {
+  authChecked = false
+  isAuth = false
+}
+
+// 直接设置认证状态（登录成功时调用，避免多余请求）
+export function setAuthCache(status: boolean) {
+  authChecked = true
+  isAuth = status
+}
+
+const router = createRouter({
+  history: createWebHistory(BASE_URL),
+  routes: [
+    {
+      path: '/login',
+      name: 'login',
+      component: () => import('@/views/login/Login.vue'),
+      meta: { guest: true }
+    },
+    {
+      path: '/',
+      component: () => import('@/layouts/MainLayout.vue'),
+      meta: { requiresAuth: true },
+      children: [
+        { path: '', name: 'dashboard', component: () => import('@/views/dashboard/Dashboard.vue') },
+        { path: 'tasks', name: 'tasks', component: () => import('@/views/tasks/Tasks.vue') },
+        { path: 'editor', name: 'editor', component: () => import('@/views/editor/Editor.vue') },
+        { path: 'environments', name: 'environments', component: () => import('@/views/environments/Environments.vue') },
+        { path: 'dependencies', name: 'dependencies', component: () => import('@/views/dependencies/Dependencies.vue') },
+        { path: 'languages', name: 'languages', component: () => import('@/views/languages/Languages.vue') },
+        { path: 'history', name: 'history', component: () => import('@/views/history/History.vue') },
+        { path: 'logs', name: 'logs', component: () => import('@/views/logs/MessageLogs.vue') },
+        { path: 'terminal', name: 'terminal', component: () => import('@/views/terminal/Terminal.vue') },
+        { path: 'notify', name: 'notify', component: () => import('@/views/notify/Notify.vue') },
+        { path: 'settings', name: 'settings', component: () => import('@/views/settings/Settings.vue') }
+      ]
+    },
+    {
+      path: '/404',
+      name: '404',
+      component: () => import('@/views/error/NotFound.vue')
+    },
+    {
+      path: '/:pathMatch(.*)*',
+      redirect: '/404'
+    }
+  ]
+})
+
+// 路由守卫
+router.beforeEach(async (to, _from, next) => {
+  // 首次访问或访问登录页时强制检查
+  const forceCheck = !authChecked || to.path === '/login'
+  const isAuthenticated = await getAuthStatus(forceCheck)
+
+  // 检查是否需要认证
+  if (to.matched.some(record => record.meta.requiresAuth)) {
+    if (isAuthenticated) {
+      next()
+    } else {
+      next('/login')
+    }
+  } else if (to.matched.some(record => record.meta.guest)) {
+    // 已登录用户访问登录页，跳转到首页
+    if (isAuthenticated) {
+      next('/')
+    } else {
+      next()
+    }
+  } else {
+    next()
+  }
+})
+
+// 捕获动态导入(Chunk)加载失败异常（部署新版本时发生）
+router.onError((error) => {
+  const isChunkLoadFailed = error.message && error.message.includes('Failed to fetch dynamically imported module')
+  if (isChunkLoadFailed) {
+    if (!sessionStorage.getItem('__chunk_reloaded__')) {
+      sessionStorage.setItem('__chunk_reloaded__', 'true')
+      window.location.reload()
+    } else {
+      console.error('动态模块加载持续失败', error)
+      sessionStorage.removeItem('__chunk_reloaded__')
+    }
+  }
+})
+
+export default router

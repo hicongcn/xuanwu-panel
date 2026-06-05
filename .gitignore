@@ -1,0 +1,64 @@
+# Binaries
+xuanwu
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+# go.sum should be committed for reproducible builds
+
+# Data & Logs
+data/
+!data/config/
+data/config/*
+!data/config/config.example.ini
+!data/agent/
+data/agent/*
+!data/agent/version.txt
+envs/
+.kiro/
+# logs/
+# scripts/
+web/dist/
+web/dev-dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Node
+node_modules/
+
+# Embedded static files (built during CI/Docker)
+internal/static/dist/
+
+# Python
+__pycache__/
+
+# Misc
+.stfolder
+
+bin/
+
+*.log
+
+# VitePress
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+docs/node_modules/
+docs/public/swagger.json
+docs/public/swagger.yaml
+
+# OpenAPI
+openapi_docs/
+
+# Builtin SDK (Force Include)
+!builtin/
+!builtin/**
+builtin/**/__pycache__/
+builtin/**/*.pyc
+

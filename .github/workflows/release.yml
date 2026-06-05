@@ -1,0 +1,267 @@
+name: Release-and-Build-Docker-Image
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: xuanwu
+
+jobs:
+  build-binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Build Web
+        run: make build-web
+
+      - name: Generate Swagger
+        run: make swag
+
+      - name: Build Binaries
+        run: |
+          VERSION=${{ github.ref_name }}
+          BUILD_TIME=$(TZ='Asia/Shanghai' date '+%Y/%m/%d %H:%M:%S')
+          LDFLAGS="-s -w -X 'github.com/hicongcn/xuanwu-panel/internal/constant.Version=$VERSION' -X 'github.com/hicongcn/xuanwu-panel/internal/constant.BuildTime=$BUILD_TIME'"
+          
+          # Prepare static assets for embedding
+          rm -rf internal/static/dist
+          cp -r web/dist internal/static/dist
+          
+          echo "==> Building for all platforms..."
+          mkdir -p dist
+          
+          for TARGET in "linux amd64" "linux arm64" "darwin amd64" "darwin arm64" "windows amd64"; do
+            GOOS=$(echo $TARGET | cut -d' ' -f1)
+            GOARCH=$(echo $TARGET | cut -d' ' -f2)
+            EXT=""
+            if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+            OUTPUT="xuanwu-${GOOS}-${GOARCH}${EXT}"
+            echo "  Building ${OUTPUT}..."
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -tags web -ldflags="$LDFLAGS" -o "dist/${OUTPUT}" main.go
+          done
+          
+          # Create tar.gz for each binary
+          cd dist
+          for f in xuanwu-linux-*; do tar -czvf "${f}.tar.gz" "$f"; done
+          for f in xuanwu-darwin-*; do tar -czvf "${f}.tar.gz" "$f"; done
+          for f in xuanwu-windows-*; do zip "${f}.zip" "$f"; done
+          cd ..
+          
+          echo "==> Built binaries:"
+          ls -lh dist/
+
+      - name: Prepare Release Notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view ${{ github.ref_name }} > /dev/null 2>&1; then
+            echo "$(cat CHANGELOG.md)" > FINAL_CHANGELOG.md
+            echo -e "\n\n" >> FINAL_CHANGELOG.md
+            gh release view ${{ github.ref_name }} --json body -q .body >> FINAL_CHANGELOG.md
+          else
+            cp CHANGELOG.md FINAL_CHANGELOG.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: FINAL_CHANGELOG.md
+          files: |
+            dist/xuanwu-linux-amd64.tar.gz
+            dist/xuanwu-linux-arm64.tar.gz
+            dist/xuanwu-darwin-amd64.tar.gz
+            dist/xuanwu-darwin-arm64.tar.gz
+            dist/xuanwu-windows-amd64.exe.zip
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        base_type: [debian, debian13, minimal]
+        platform:
+          - linux/amd64
+          - linux/arm64
+        include:
+          - base_type: debian
+            platform: linux/amd64
+            base_tag: base
+            tag_suffix: ""
+          - base_type: debian
+            platform: linux/arm64
+            base_tag: base
+            tag_suffix: ""
+#           - base_type: alpine
+#             platform: linux/amd64
+#             base_tag: base-alpine
+#             tag_suffix: "-alpine"
+#           - base_type: alpine
+#             platform: linux/arm64
+#             base_tag: base-alpine
+#             tag_suffix: "-alpine"
+          - base_type: debian13
+            platform: linux/amd64
+            base_tag: base-debian13
+            tag_suffix: "-debian13"
+          - base_type: debian13
+            platform: linux/arm64
+            base_tag: base-debian13
+            tag_suffix: "-debian13"
+          - base_type: minimal
+            platform: linux/amd64
+            base_tag: base-minimal
+            tag_suffix: "-minimal"
+          - base_type: minimal
+            platform: linux/arm64
+            base_tag: base-minimal
+            tag_suffix: "-minimal"
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set platform pair
+        id: platform
+        run: |
+          platform=${{ matrix.platform }}
+          echo "pair=${platform//\//-}-${{ matrix.base_type }}" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+
+      - name: Get build time
+        id: build_time
+        run: echo "time=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.base_type == 'minimal' && './docker/Dockerfile.minimal' || './docker/Dockerfile' }}
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            BUILD_TIME=${{ steps.build_time.outputs.time }}
+            BASE_TAG=${{ matrix.base_tag }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ steps.platform.outputs.pair }}
+          cache-to: type=gha,scope=${{ steps.platform.outputs.pair }},mode=max
+          provenance: false
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ steps.platform.outputs.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: [build, build-binaries]
+    strategy:
+      matrix:
+        base_type: [debian, debian13, minimal]
+        include:
+          - base_type: debian
+            tag_suffix: ""
+#           - base_type: alpine
+#             tag_suffix: "-alpine"
+          - base_type: debian13
+            tag_suffix: "-debian13"
+          - base_type: minimal
+            tag_suffix: "-minimal"
+
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digests-*-${{ matrix.base_type }}
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}${{ matrix.tag_suffix }}
+            type=raw,value=latest${{ matrix.tag_suffix }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+

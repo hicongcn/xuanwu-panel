@@ -1,0 +1,126 @@
+ARG BASE_TAG=base
+# ================================
+# Stage 1: Build frontend
+# ================================
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
+
+WORKDIR /app/web
+
+# Copy package files
+COPY web/package*.json ./
+
+# Install dependencies using cache mount for npm
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
+
+# Copy frontend source
+COPY web/ ./
+
+# Build frontend
+RUN npm run build
+
+# ================================
+# Stage 0: Generate build info
+# ================================
+FROM alpine:3.19 AS build-info
+
+ARG VERSION
+ARG BUILD_TIME
+
+# 生成版本信息文件（使用东八区时间）
+RUN VERSION_VAL="${VERSION:-dev-$(TZ=Asia/Shanghai date '+%Y%m%d%H%M%S')}" && \
+    BUILD_TIME_VAL="${BUILD_TIME:-$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')}" && \
+    mkdir -p /build-info && \
+    echo "${VERSION_VAL}" > /build-info/version.txt && \
+    echo "${BUILD_TIME_VAL}" > /build-info/build_time.txt
+
+# ================================
+# Stage 2: Build backend
+# ================================
+FROM --platform=$BUILDPLATFORM golang:1.25 AS backend-builder
+
+ARG TARGETOS
+ARG TARGETARCH
+
+
+WORKDIR /app
+
+# Copy build info
+COPY --from=build-info /build-info /build-info
+
+# Go mod files
+COPY go.mod go.sum ./
+RUN go env -w GOPROXY=https://goproxy.cn,direct
+# Using Go build cache mount can significantly speed up consecutive builds
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+# Copy backend source
+COPY . .
+
+# Copy frontend dist (needed for embedding)
+COPY --from=frontend-builder /app/web/dist ./internal/static/dist
+
+# Generate Swagger (Optional: better to commit docs and only copy, but if needed, install once)
+# If openapi_docs exists, just use it, otherwise generate.
+# Here we avoid go run @latest by copying it if you have it locally.
+# If you don't, we install it once to the image.
+RUN go install github.com/swaggo/swag/cmd/swag@latest
+RUN swag init -g main.go -o ./openapi_docs
+
+# Build Go binary using cache mounts for faster builds
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    VERSION_VAL=$(cat /build-info/version.txt) && \
+    BUILD_TIME_VAL=$(cat /build-info/build_time.txt) && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-s -w -X github.com/hicongcn/xuanwu-panel/internal/constant.Version=${VERSION_VAL} -X 'github.com/hicongcn/xuanwu-panel/internal/constant.BuildTime=${BUILD_TIME_VAL}'" \
+    -o xuanwu .
+
+# ================================
+# Stage 3: Final image
+# ================================
+ARG BASE_TAG
+FROM ghcr.io/hicongcn/xuanwu:${BASE_TAG}
+
+ENV TZ=Asia/Shanghai
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV MISE_DATA_DIR=/app/data/deps/mise
+ENV MISE_CONFIG_DIR=/app/data/deps/mise
+ENV PATH="/app/data/deps/mise/shims:/app/data/deps/mise/bin:$PATH"
+
+# # 安装必要系统工具 + Node + Python
+# RUN sed -i 's@deb.debian.org@mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list.d/debian.sources \
+#     && sed -i 's@security.debian.org@mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list.d/debian.sources \
+#     && echo "${TZ}" > /etc/timezone \
+#     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
+#     && apt-get update \
+#     && apt-get install -y --no-install-recommends \
+#          tzdata git gcc curl wget vim nodejs htop npm python3 python3-venv python3-pip \
+#     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy Go binary directly to /usr/local/bin (avoid conflict with /app/xuanwu/ data dir)
+COPY --from=backend-builder /app/xuanwu /usr/local/bin/xuanwu
+
+# Copy frontend assets to /www/xuanwu (No embed in Docker)
+COPY --from=frontend-builder /app/web/dist /www/xuanwu
+
+# Copy example config to /app/config (outside data volume, survives mount)
+COPY --from=backend-builder /app/data/config /app/config
+COPY --from=backend-builder /app/example ./example
+COPY builtin/ /www/builtin
+COPY docker/docker-entrypoint.sh .
+
+
+COPY docker/mise-hook.sh /etc/profile.d/mise-hook.sh
+
+RUN chmod +x docker-entrypoint.sh \
+    && cat /etc/profile.d/mise-hook.sh >> /etc/bash.bashrc \
+    && echo "set encoding=utf-8" >> /etc/vim/vimrc
+
+EXPOSE 8052
+
+ENTRYPOINT ["./docker-entrypoint.sh"]

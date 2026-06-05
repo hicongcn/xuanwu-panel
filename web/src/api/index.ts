@@ -1,0 +1,639 @@
+// 获取 base URL（从后端注入的全局变量）
+const BASE_URL = (window as any).__BASE_URL__ || ''
+const API_VERSION = (window as any).__API_VERSION__ || '/api/v1'
+const API_BASE_URL = BASE_URL + API_VERSION
+
+interface ApiResponse<T> {
+  code: number
+  msg: string
+  data: T
+}
+
+async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE_URL}${url}`, {
+    ...options,
+    credentials: 'include', // 携带 Cookie
+    headers: {
+      'Content-Type': 'application/json',
+      ...options?.headers
+    }
+  })
+
+  const json: ApiResponse<T> = await res.json()
+
+  if (json.code === 401) {
+    // 未登录或登录过期，跳转到登录页
+    window.location.href = BASE_URL + '/login'
+    throw new Error(json.msg || '请先登录')
+  }
+
+  if (json.code !== 200) {
+    throw new Error(json.msg || '请求失败')
+  }
+
+  return json.data
+}
+
+// 检查登录状态（不触发自动跳转）
+export async function checkAuth(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/auth/me`, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    const json: ApiResponse<{ username: string }> = await res.json()
+    return json.code === 200
+  } catch {
+    return false
+  }
+}
+
+export const api = {
+  auth: {
+    login: (data: { username: string; password: string }) =>
+      request<{ user: string }>('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
+    logout: () => request('/auth/logout', { method: 'POST' }),
+    me: () => request<{ username: string; role: string }>('/auth/me'),
+    register: (data: { username: string; password: string; email: string }) =>
+      request('/auth/register', { method: 'POST', body: JSON.stringify(data) })
+  },
+  tasks: {
+    list: (params?: { page?: number; page_size?: number; name?: string; tags?: string; type?: string }) => {
+      const query = new URLSearchParams()
+      if (params?.page) query.set('page', String(params.page))
+      if (params?.page_size) query.set('page_size', String(params.page_size))
+      if (params?.name) query.set('name', params.name)
+      if (params?.tags) query.set('tags', params.tags)
+      if (params?.type) query.set('type', params.type)
+      return request<TaskListResponse>(`/tasks?${query}`)
+    },
+    create: (data: Partial<Task>) => request<Task>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: Partial<Task>) => request<Task>(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: string, params?: { delete_files?: boolean }) => {
+      const query = new URLSearchParams()
+      if (params?.delete_files !== undefined) query.set('delete_files', String(params.delete_files))
+      const queryString = query.toString()
+      return request(`/tasks/${id}${queryString ? '?' + queryString : ''}`, { method: 'DELETE' })
+    },
+    batchDelete: (ids: string[]) => request<{ count: number }>('/tasks/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+    batchDeleteByQuery: (params?: { name?: string, tags?: string, type?: string }) => {
+      const query = new URLSearchParams()
+      if (params?.name) query.append('name', params.name)
+      if (params?.tags) query.append('tags', params.tags)
+      if (params?.type && params.type !== 'all') query.append('type', params.type)
+      return request<{ count: number }>(`/tasks/batch-by-query?${query.toString()}`, { method: 'DELETE' })
+    },
+    execute: (id: string) => request<ExecutionResult>(`/execute/task/${id}`, { method: 'POST' }),
+    stop: (logID: string) => request(`/tasks/stop/${logID}`, { method: 'POST' }),
+    tags: () => request<string[]>('/tasks/tags')
+  },
+  scripts: {
+    list: () => request<Script[]>('/scripts'),
+    create: (data: Partial<Script>) => request<Script>('/scripts', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: Partial<Script>) => request<Script>(`/scripts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: string) => request(`/scripts/${id}`, { method: 'DELETE' })
+  },
+  env: {
+    list: (params?: { page?: number; page_size?: number; name?: string; type?: string }) => {
+      const query = new URLSearchParams()
+      if (params?.page) query.set('page', String(params.page))
+      if (params?.page_size) query.set('page_size', String(params.page_size))
+      if (params?.name) query.set('name', params.name)
+      if (params?.type && params.type !== 'all') query.set('type', params.type)
+      return request<EnvListResponse>(`/env?${query}`)
+    },
+    all: () => request<EnvVar[]>('/env/all'),
+    tasks: (id: string) => request<Task[]>(`/env/${id}/tasks`),
+    create: (data: Partial<EnvVar>) => request<EnvVar>('/env', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: Partial<EnvVar>) => request<EnvVar>(`/env/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: string, force?: boolean) => {
+      const query = force ? '?force=true' : ''
+      return fetch(`${API_BASE_URL}/env/${id}${query}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      }).then(res => res.json() as Promise<ApiResponse<any>>)
+    }
+  },
+  execute: {
+    command: (command: string) => request('/execute/command', { method: 'POST', body: JSON.stringify({ command }) }),
+    results: () => request('/execute/results')
+  },
+  logs: {
+    list: (params?: { page?: number; page_size?: number; task_id?: string; task_name?: string; status?: string }) => {
+      const query = new URLSearchParams()
+      if (params?.page) query.set('page', String(params.page))
+      if (params?.page_size) query.set('page_size', String(params.page_size))
+      if (params?.task_id) query.set('task_id', params.task_id)
+      if (params?.task_name) query.set('task_name', params.task_name)
+      if (params?.status) query.set('status', params.status)
+      return request<LogListResponse>(`/logs?${query}`)
+    },
+    get: (id: string) => request<LogDetail>(`/logs/${id}`),
+    detail: (id: string) => request<LogDetail>(`/logs/${id}`),
+    delete: (id: string) => request(`/logs/${id}`, { method: 'DELETE' }),
+    clear: (taskId?: string) => request('/logs/clear', { method: 'POST', body: JSON.stringify({ task_id: taskId }) })
+  },
+  dashboard: {
+    stats: () => request<Stats>('/stats'),
+    sentence: () => request<{ sentence: string }>('/sentence'),
+    sendStats: (days?: number) => request<DailyStats[]>(`/sendstats${days ? `?days=${days}` : ''}`),
+    taskStats: (days?: number) => request<TaskStatsItem[]>(`/taskstats${days ? `?days=${days}` : ''}`)
+  },
+  settings: {
+    changePassword: (data: { old_username?: string; username?: string; old_password: string; new_password?: string }) =>
+      request('/settings/password', { method: 'POST', body: JSON.stringify(data) }),
+    getSite: () => request<SiteSettings>('/settings/site'),
+    getPublicSite: () => request<{ title: string; subtitle: string; icon: string; demo_mode: boolean }>('/settings/public'),
+    updateSite: (data: SiteSettings) =>
+      request('/settings/site', { method: 'PUT', body: JSON.stringify(data) }),
+    generateOpenapiToken: () => request<{ token: string }>('/settings/site/openapi-token/generate', { method: 'POST' }),
+    getScheduler: () => request<SchedulerSettings>('/settings/scheduler'),
+    updateScheduler: (data: SchedulerSettings) =>
+      request('/settings/scheduler', { method: 'PUT', body: JSON.stringify(data) }),
+    getPaths: () => request<{ scripts_dir: string }>('/settings/paths'),
+    getAbout: () => request<AboutInfo>('/settings/about'),
+    getChangelog: () => request<string>('/settings/changelog'),
+    get: (section: string, key: string) => request<string>(`/settings/${section}/${key}`),
+    getSection: (section: string) => request<Record<string, string>>(`/settings/${section}`),
+    setSection: (section: string, values: Record<string, string>) =>
+      request(`/settings/${section}`, { method: 'PUT', body: JSON.stringify(values) }),
+    generateToken: (section: string, key: string) =>
+      request<string>(`/settings/${section}/${key}/generate`, { method: 'POST' }),
+    getLoginLogs: (params?: { page?: number; page_size?: number; username?: string }) => {
+      const query = new URLSearchParams()
+      if (params?.page) query.set('page', String(params.page))
+      if (params?.page_size) query.set('page_size', String(params.page_size))
+      if (params?.username) query.set('username', params.username)
+      return request<LoginLogListResponse>(`/settings/loginlogs?${query}`)
+    },
+    createBackup: () => request('/settings/backup', { method: 'POST' }),
+    getBackupStatus: () => request<{ has_backup: boolean; backup_time: string }>('/settings/backup/status'),
+    downloadBackup: () => `${API_BASE_URL}/settings/backup/download`,
+    restoreBackup: async (file: File) => {
+      const formData = new FormData()
+      formData.append('file', file)
+      const res = await fetch(`${API_BASE_URL}/settings/restore`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData
+      })
+      const json: ApiResponse<null> = await res.json()
+      if (json.code === 401) {
+        window.location.href = BASE_URL + '/login'
+        throw new Error('请先登录')
+      }
+      if (json.code !== 200) throw new Error(json.msg || '恢复失败')
+    }
+  },
+  files: {
+    tree: () => request<FileNode[]>('/files/tree'),
+    getContent: (path: string) => request<{ path: string; content: string }>(`/files/content?path=${encodeURIComponent(path)}`),
+    download: (path: string) => `${API_BASE_URL}/files/download?path=${encodeURIComponent(path)}`,
+    saveContent: (path: string, content: string) => request('/files/content', { method: 'POST', body: JSON.stringify({ path, content }) }),
+    create: (path: string, isDir: boolean) => request('/files/create', { method: 'POST', body: JSON.stringify({ path, isDir }) }),
+    delete: (path: string) => request('/files/delete', { method: 'POST', body: JSON.stringify({ path }) }),
+    rename: (oldPath: string, newPath: string) => request('/files/rename', { method: 'POST', body: JSON.stringify({ oldPath, newPath }) }),
+    move: (oldPath: string, newPath: string) => request('/files/move', { method: 'POST', body: JSON.stringify({ oldPath, newPath }) }),
+    copy: (sourcePath: string, targetPath: string) => request('/files/copy', { method: 'POST', body: JSON.stringify({ sourcePath, targetPath }) }),
+    uploadArchive: async (file: File, targetPath?: string) => {
+      const formData = new FormData()
+      formData.append('file', file)
+      if (targetPath) formData.append('path', targetPath)
+
+      const res = await fetch(`${API_BASE_URL}/files/upload`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData
+      })
+      const json: ApiResponse<null> = await res.json()
+      if (json.code === 401) {
+        window.location.href = BASE_URL + '/login'
+        throw new Error('请先登录')
+      }
+      if (json.code !== 200) throw new Error(json.msg || '上传失败')
+    },
+    uploadFiles: async (files: FileList, paths: string[], targetPath?: string) => {
+      const formData = new FormData()
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        if (file) {
+          formData.append('files', file)
+          formData.append('paths', paths[i] || file.name)
+        }
+      }
+      if (targetPath) formData.append('path', targetPath)
+
+      const res = await fetch(`${API_BASE_URL}/files/uploadfiles`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData
+      })
+      const json: ApiResponse<null> = await res.json()
+      if (json.code === 401) {
+        window.location.href = BASE_URL + '/login'
+        throw new Error('请先登录')
+      }
+      if (json.code !== 200) throw new Error(json.msg || '上传失败')
+    }
+  },
+  deps: {
+    list: (params?: { language?: string; lang_version?: string }) => {
+      const query = new URLSearchParams()
+      if (params?.language) query.set('language', params.language)
+      if (params?.lang_version) query.set('lang_version', params.lang_version)
+      return request<Dependency[]>(`/deps?${query}`)
+    },
+    create: (data: { name: string; version?: string; language: string; lang_version?: string; remark?: string }) =>
+      request<Dependency>('/deps', { method: 'POST', body: JSON.stringify(data) }),
+    delete: (id: string) => request(`/deps/${id}`, { method: 'DELETE' }),
+    install: (data: any) => request<any>('/deps/install', { method: 'POST', body: JSON.stringify(data) }),
+    getInstallCmd: (data: any) => request<{ command: string }>('/deps/install-cmd', { method: 'POST', body: JSON.stringify(data) }),
+    uninstall: (id: string, force?: boolean) => {
+      const query = force ? '?force=true' : ''
+      return request<any>(`/deps/uninstall/${id}${query}`, { method: 'POST' })
+    },
+    reinstall: (id: string) => request(`/deps/reinstall/${id}`, { method: 'POST' }),
+    reinstallAll: (language: string, lang_version?: string) => {
+      const query = new URLSearchParams({ language })
+      if (lang_version) query.set('lang_version', lang_version)
+      return request(`/deps/reinstall-all?${query}`, { method: 'POST' })
+    },
+    getReinstallAllCmd: (language: string, lang_version?: string) => {
+      const query = new URLSearchParams({ language })
+      if (lang_version) query.set('lang_version', lang_version)
+      return request<{ command: string }>(`/deps/reinstall-all-cmd?${query}`, { method: 'POST' })
+    },
+    getBatchInstallCmd: (data: { items: { name: string; version?: string; language: string; lang_version?: string }[] }) =>
+      request<{ command: string }>('/deps/batch-install-cmd', { method: 'POST', body: JSON.stringify(data) }),
+    import: (data: { language: string; lang_version?: string; content: string; import_db?: boolean }) =>
+      request<{ dependencies: Dependency[]; command: string }>('/deps/import', { method: 'POST', body: JSON.stringify(data) }),
+    getInstalled: (language: string, lang_version?: string) => {
+      const query = new URLSearchParams({ language })
+      if (lang_version) query.set('lang_version', lang_version)
+      return request<Dependency[]>(`/deps/installed?${query}`)
+    }
+  },
+  mise: {
+    list: () => request<MiseLanguage[]>('/mise/ls'),
+    sync: () => request<void>('/mise/sync', { method: 'POST' }),
+    plugins: () => request<string[]>('/mise/plugins'),
+    versions: (plugin: string) => request<string[]>(`/mise/versions?plugin=${plugin}`),
+    verifyCommand: (plugin: string, version: string) => request<{ command: string }>(`/mise/verify-cmd?plugin=${plugin}&version=${version}`),
+    useGlobal: (plugin: string, version: string) => request<void>('/mise/use-global', { method: 'POST', body: JSON.stringify({ plugin, version }) }),
+    unsetGlobal: (plugin: string, version: string) => request<void>('/mise/unset-global', { method: 'POST', body: JSON.stringify({ plugin, version }) }),
+    getEnvs: () => request<Record<string, string>>('/mise/envs'),
+    setEnv: (key: string, value: string) => request<void>('/mise/envs', { method: 'POST', body: JSON.stringify({ key, value }) }),
+    unsetEnv: (key: string) => request<void>(`/mise/envs?key=${key}`, { method: 'DELETE' })
+  },
+  terminal: {
+    cmds: () => request<{ name: string, description: string }[]>('/terminal/cmds')
+  },
+  notify: {
+    getTypes: () => request<{ channel_types: ChannelType[]; event_types: EventType[] }>('/notify/types'),
+    getChannels: () => request<NotifyChannel[]>('/notify/channels'),
+    saveChannel: (data: Partial<NotifyChannel>) =>
+      request('/notify/channels', { method: 'POST', body: JSON.stringify(data) }),
+    deleteChannel: (id: string) => request('/notify/channels/' + id, { method: 'DELETE' }),
+    testChannel: (data: Partial<NotifyChannel>) =>
+      request<NotifyResult>('/notify/channels/test', { method: 'POST', body: JSON.stringify(data) }),
+
+    getBindings: () => request<NotifyBinding[]>('/notify/bindings'),
+    saveBinding: (data: Partial<NotifyBinding>) =>
+      request<NotifyBinding>('/notify/bindings', { method: 'POST', body: JSON.stringify(data) }),
+    saveBindingsBatch: (data: { type: string; data_id: string; bindings: Partial<NotifyBinding>[] }) =>
+      request('/notify/bindings/batch', { method: 'POST', body: JSON.stringify(data) }),
+    deleteBinding: (id: string) => request('/notify/bindings/' + id, { method: 'DELETE' }),
+    send: (data: { channel_id: string; title: string; text: string }) =>
+      request<NotifyResult>('/notify/send', { method: 'POST', body: JSON.stringify(data) })
+  },
+  appLogs: {
+    list: (params?: { page?: number; page_size?: number; category?: string; status?: string; level?: string; keyword?: string }) => {
+      const query = new URLSearchParams()
+      if (params?.page) query.set('page', String(params.page))
+      if (params?.page_size) query.set('page_size', String(params.page_size))
+      if (params?.category) query.set('category', params.category)
+      if (params?.status) query.set('status', params.status)
+      if (params?.level) query.set('level', params.level)
+      if (params?.keyword) query.set('keyword', params.keyword)
+      return request<AppLogListResponse>(`/app-logs?${query}`)
+    },
+    markAsRead: (data: { id?: string; category?: string }) => request('/app-logs/read', { method: 'POST', body: JSON.stringify(data) }),
+    clear: (category: string) => request('/app-logs/clear', { method: 'POST', body: JSON.stringify({ category }) })
+  }
+}
+
+export interface FileNode {
+  name: string
+  path: string
+  isDir: boolean
+  children?: FileNode[]
+}
+
+export interface Task {
+  id: string
+  name: string
+  remark: string
+  command: string
+  pre_command: string
+  post_command: string
+  tags: string
+  type: string
+  trigger_type: string
+  config: string
+  schedule: string
+  timeout: number
+  work_dir: string
+  clean_config: string
+  envs: string
+  retry_count: number
+  retry_interval: number
+  random_range: number
+  pin_type: 'none' | 'top'
+  languages: { name: string; version: string }[]
+  enabled: boolean
+  last_run: string
+  next_run: string
+  running_status?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface RepoConfig {
+  source_type: string
+  source_url: string
+  target_path: string
+  branch: string
+  sparse_path: string
+  single_file: boolean
+  proxy: string
+  proxy_url: string
+  auth_token: string
+  whitelist_paths?: string
+  blacklist?: string
+  dependence?: string
+  extensions?: string
+  auto_add_cron?: boolean
+  commenttotask?: string
+  concurrency?: number
+  repo_source?: string
+}
+
+export interface ExecutionResult {
+  task_id: string
+  log_id?: string
+  success: boolean
+  status?: string
+  output?: string
+  error?: string
+  duration?: number
+  exit_code?: number
+  start_time?: string
+  end_time?: string
+}
+
+export interface TaskListResponse {
+  data: Task[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface Script {
+  id: string
+  name: string
+  content: string
+}
+
+export interface EnvVar {
+  id: string
+  name: string
+  value: string
+  remark: string
+  type: string
+  hidden: boolean
+  enabled: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface EnvListResponse {
+  data: EnvVar[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface Stats {
+  tasks: number
+  today_execs: number
+  envs: number
+  logs: number
+  scheduled: number
+  running: number
+}
+
+
+export interface TaskLog {
+  id: string
+  task_id: string
+  task_name: string
+  task_type: string
+  command: string
+  status: string
+  duration: number
+  error: string | null
+  start_time: string | null
+  end_time: string | null
+  created_at: string
+}
+
+export interface LogListResponse {
+  data: TaskLog[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface LogDetail {
+  id: string
+  task_id: string
+  command: string
+  output: string
+  error: string | null
+  status: string
+  duration: number
+  start_time: string | null
+  end_time: string | null
+  created_at: string
+}
+
+export interface AboutInfo {
+  version: string
+  remote_version?: string
+  build_time: string
+  mem_usage: string
+  goroutines: number
+  uptime: string
+  task_count: number
+  log_count: number
+  env_count: number
+}
+
+export interface SiteSettings {
+  title: string
+  subtitle: string
+  icon: string
+  page_size: string
+  cookie_days: string
+  openapi_enabled?: boolean
+  openapi_token?: string
+  openapi_token_expire?: string
+  system_notice_days?: string
+  system_notice_max_count?: string
+  push_log_days?: string
+  push_log_max_count?: string
+  login_log_days?: string
+  login_log_max_count?: string
+  scheduler_log_days?: string
+  scheduler_log_max_count?: string
+}
+
+export interface SchedulerSettings {
+  worker_count: string
+  queue_size: string
+  rate_interval: string
+}
+
+
+export interface LoginLog {
+  id: string
+  username: string
+  ip: string
+  user_agent: string
+  status: string
+  message: string
+  created_at: string
+}
+
+export interface LoginLogListResponse {
+  data: LoginLog[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface DailyStats {
+  day: string
+  total: number
+  success: number
+  failed: number
+}
+
+export interface TaskStatsItem {
+  task_id: string
+  task_name: string
+  count: number
+}
+
+export interface Dependency {
+  id: string
+  name: string
+  version: string
+  language: string
+  lang_version: string
+  remark: string
+  log: string
+  created_at: string
+  updated_at: string
+}
+
+export interface MiseLanguage {
+  plugin: string
+  version: string
+  source: { type?: string; path?: string } | string
+  is_global: boolean
+  install_path?: string
+  installed_at?: string  // 安装日期
+}
+
+export interface ChannelType {
+  type: string
+  label: string
+}
+
+export interface EventType {
+  type: string
+  label: string
+  binding_type?: string
+}
+
+export interface NotifyChannel {
+  id: string
+  name: string
+  type: string
+  enabled: boolean
+  created_at?: string
+  config: Record<string, string>
+}
+
+export interface NotifyBinding {
+  id: string
+  type: string
+  event: string
+  way_id: string
+  data_id: string
+  extra?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface BindingExtra {
+  enable_log: boolean
+  log_limit: number
+}
+
+export interface NotifyResult {
+  success: boolean
+  error?: string
+}
+
+export interface AppLog {
+  id: string
+  category: string
+  title: string
+  content: string
+  level: string
+  status: string
+  ref_id: string
+  channel_name?: string
+  error_msg: string
+  created_at: string
+  read_at: string | null
+}
+
+export interface AppLogListResponse {
+  data: AppLog[]
+  total: number
+}
+
+export const LOG_CATEGORY = {
+  SYSTEM_NOTICE: 'system_notice',
+  PUSH_LOG: 'push_log',
+  LOGIN_LOG: 'login_log',
+  SCHEDULER_LOG: 'scheduler_log'
+} as const
+
+export const LOG_LEVEL = {
+  INFO: 'info',
+  WARNING: 'warning',
+  ERROR: 'error'
+} as const
+
+export const LOG_STATUS = {
+  UNREAD: 'unread',
+  READ: 'read',
+  SUCCESS: 'success',
+  FAILED: 'failed'
+} as const
+
+
