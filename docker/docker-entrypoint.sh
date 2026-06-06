@@ -40,42 +40,6 @@ if [ -d "/app/config" ] && [ -z "$(ls -A "$DATA_DIR/config" 2>/dev/null)" ]; the
   log "Example config synced"
 fi
 
-# 兼容旧版：如果旧的独立目录存在且不是符号链接，迁移到 data/ 下
-for dir_name in configs envs; do
-  if [ -d "/app/$dir_name" ] && [ ! -L "/app/$dir_name" ]; then
-    log "Migrating /app/$dir_name to $DATA_DIR/ ..."
-    case "$dir_name" in
-      configs)
-        if [ -z "$(ls -A "$DATA_DIR/config" 2>/dev/null)" ] && [ -n "$(ls -A "/app/$dir_name" 2>/dev/null)" ]; then
-          cp -a "/app/$dir_name/." "$DATA_DIR/config/"
-        fi
-        ;;
-      envs)
-        if [ -z "$(ls -A "$DATA_DIR/deps" 2>/dev/null)" ] && [ -n "$(ls -A "/app/$dir_name" 2>/dev/null)" ]; then
-          cp -a "/app/$dir_name/." "$DATA_DIR/deps/"
-        fi
-        ;;
-    esac
-    rm -rf "/app/$dir_name"
-    log "Migrated /app/$dir_name"
-  fi
-done
-
-# 兼容旧版：如果 /app/data/xuanwu.db 存在，移到 data/db/
-if [ -f "$DATA_DIR/xuanwu.db" ]; then
-  mv "$DATA_DIR/xuanwu.db" "$DATA_DIR/db/xuanwu.db" 2>/dev/null || true
-  log "Migrated xuanwu.db to $DATA_DIR/db/"
-fi
-
-# 兼容旧版：如果 /app/data/backups/ 存在，重命名为 data/bak/
-if [ -d "$DATA_DIR/backups" ] && [ ! -L "$DATA_DIR/backups" ]; then
-  if [ -z "$(ls -A "$DATA_DIR/bak" 2>/dev/null)" ] && [ -n "$(ls -A "$DATA_DIR/backups" 2>/dev/null)" ]; then
-    cp -a "$DATA_DIR/backups/." "$DATA_DIR/bak/"
-  fi
-  rm -rf "$DATA_DIR/backups"
-  log "Migrated backups -> bak"
-fi
-
 # 同步示例脚本
 if [ -d "/app/example" ]; then
   mkdir -p "$DATA_DIR/scripts/example"

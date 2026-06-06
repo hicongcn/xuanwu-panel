@@ -1,9 +1,6 @@
 package services
 
 import (
-	"encoding/json"
-	"fmt"
-
 	"github.com/hicongcn/xuanwu-panel/internal/cache"
 	"github.com/hicongcn/xuanwu-panel/internal/constant"
 	"github.com/hicongcn/xuanwu-panel/internal/database"
@@ -32,39 +29,6 @@ func (s *SettingsService) InitSettings() error {
 				}).Error; err != nil {
 					return err
 				}
-			}
-		}
-	}
-
-	// 初始化日志清理配置
-	// 检查是否需要从旧的 JSON 迁移
-	oldVal := s.Get(constant.SectionSystem, "log_retention")
-	if oldVal != "" {
-		var oldConfigs map[string]struct {
-			Days     int `json:"days"`
-			MaxCount int `json:"max_count"`
-		}
-		if err := json.Unmarshal([]byte(oldVal), &oldConfigs); err == nil {
-			migrationMap := map[string]string{}
-			if cfg, ok := oldConfigs[constant.LogCategorySystemNotice]; ok {
-				migrationMap[constant.KeySystemNoticeDays] = fmt.Sprintf("%d", cfg.Days)
-				migrationMap[constant.KeySystemNoticeMaxCount] = fmt.Sprintf("%d", cfg.MaxCount)
-			}
-			if cfg, ok := oldConfigs[constant.LogCategoryPushLog]; ok {
-				migrationMap[constant.KeyPushLogDays] = fmt.Sprintf("%d", cfg.Days)
-				migrationMap[constant.KeyPushLogMaxCount] = fmt.Sprintf("%d", cfg.MaxCount)
-			}
-			if cfg, ok := oldConfigs[constant.LogCategoryLoginLog]; ok {
-				migrationMap[constant.KeyLoginLogDays] = fmt.Sprintf("%d", cfg.Days)
-				migrationMap[constant.KeyLoginLogMaxCount] = fmt.Sprintf("%d", cfg.MaxCount)
-			}
-
-			if len(migrationMap) > 0 {
-				for k, v := range migrationMap {
-					s.Set(constant.SectionSystem, k, v)
-				}
-				// 迁移完成后删除旧键
-				s.Delete(constant.SectionSystem, "log_retention")
 			}
 		}
 	}

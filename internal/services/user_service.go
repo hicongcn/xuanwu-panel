@@ -1,14 +1,10 @@
 package services
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/hicongcn/xuanwu-panel/internal/constant"
 	"github.com/hicongcn/xuanwu-panel/internal/database"
 	"github.com/hicongcn/xuanwu-panel/internal/models"
 	"github.com/hicongcn/xuanwu-panel/internal/utils"
@@ -28,11 +24,6 @@ func (us *UserService) hashPassword(password string) (string, error) {
 		return "", err
 	}
 	return string(bytes), nil
-}
-
-func (us *UserService) legacyHashPassword(password string) string {
-	hash := sha256.Sum256([]byte(password + constant.Secret))
-	return hex.EncodeToString(hash[:])
 }
 
 func (us *UserService) CreateUser(username, password, email, role string) *models.User {
@@ -68,26 +59,8 @@ func (us *UserService) GetUserByID(id string) (*models.User, error) {
 }
 
 func (us *UserService) ValidatePassword(user *models.User, password string) bool {
-	// 尝试 bcrypt 校验
 	err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
-	if err == nil {
-		return true
-	}
-
-	// 如果 bcrypt 失败，检查是否为旧的 SHA256 格式
-	// 旧格式是 64 位十六进制字符串
-	if len(user.Password) == 64 && !strings.HasPrefix(user.Password, "$2") {
-		if user.Password == us.legacyHashPassword(password) {
-			// 校验成功，迁移到 bcrypt
-			newHash, err := us.hashPassword(password)
-			if err == nil {
-				database.DB.Model(user).Update("password", newHash)
-			}
-			return true
-		}
-	}
-
-	return false
+	return err == nil
 }
 
 func (us *UserService) AuthenticateUser(username, password string) bool {

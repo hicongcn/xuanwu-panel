@@ -1,33 +1,10 @@
-> 出于安全及环境隔离考虑，推荐使用 Docker/Compose 部署方式。[镜像地址](https://github.com/hicongcn/xuanwu-panel/pkgs/container/xuanwu)
+# Changelog
 
+## v1.0.2 (2026-06-06)
 
-
-### 🐳 方式一：Docker 部署（推荐）
-[部署文档](https://github.com/engigu/xuanwu-panel?tab=readme-ov-file#%E5%BF%AB%E9%80%9F%E9%83%A8%E7%BD%B2)
-
-### 🚀 方式二：单文件部署
-从当前 Release 的附件中下载对应架构的部署压缩包（如 `xuanwu-linux-amd64.tar.gz`），然后使用以下命令提取并运行：
-
-**⚠️ 重要前置依赖：手动安装 `mise`**
-单文件直接运行依赖宿主机系统环境，请务必先安装 [mise](https://mise.jdx.dev/getting-started.html) 供任务调度及环境管理使用：
-```bash
-curl https://mise.run | sh
-export PATH="~/.local/share/mise/bin:~/.local/share/mise/shims:$PATH"
-```
-
-**运行面板：**
-```bash
-tar -xzvf xuanwu-linux-amd64.tar.gz
-chmod +x xuanwu-linux-amd64
-./xuanwu-linux-amd64 server
-```
-
----
-
-**访问面板：**
-启动后访问：http://localhost:8052
-
-**登录信息：**
-默认账号：用户名 `admin`，密码见面板首次启动时的控制台日志。
-
-
+### What's Changed
+- 移除旧版本 V3 ID 迁移代码及数据库兼容迁移逻辑
+- 移除旧版 SHA256 密码哈希兼容代码，仅保留 bcrypt
+- 移除旧版配置 JSON 格式迁移逻辑
+- 移除 Docker 容器旧版数据目录迁移逻辑
+- 移除注释掉的死代码及无用工具函数
