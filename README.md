@@ -218,12 +218,8 @@ server {
 
 ## 致谢
 
-本项目的开发离不开以下优秀的开源项目：
-
-- **[baihu-panel](https://github.com/engigu/baihu-panel)** — 后端框架架构参考，部分代码基于白虎面板改进
+- **[baihu-panel](https://github.com/engigu/baihu-panel)** — 代码基于白虎面板改进
 - **[qinglong](https://github.com/whyour/qinglong)** — 功能设计参考，定时任务管理、环境变量、订阅管理等核心功能借鉴自青龙面板
-
-感谢以上项目作者的贡献！
 
 ## 免责声明
 
@@ -234,3 +230,4 @@ server {
 本项目采用 [Apache License 2.0](LICENSE) 协议。
 
 ***
+
